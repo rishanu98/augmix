@@ -30,15 +30,26 @@ import time
 import augmentations
 from models.cifar.allconv import AllConvNet
 import numpy as np
+from torch.nn import Linear
 from third_party.ResNeXt_DenseNet.models.densenet import densenet
 from third_party.ResNeXt_DenseNet.models.resnext import resnext29
 from third_party.WideResNet_pytorch.wideresnet import WideResNet
 
 import torch
+import torchvision
+import timm
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 from torchvision import datasets
 from torchvision import transforms
+from torchvision import models
+from torchvision.models import resnet18
+
+ 
+
+from torch.utils.tensorboard import SummaryWriter
+writer  = SummaryWriter("runs/cifar")
+
 
 parser = argparse.ArgumentParser(
     description='Trains a CIFAR Classifier',
@@ -54,9 +65,24 @@ parser.add_argument(
     '-m',
     type=str,
     default='wrn',
-    choices=['wrn', 'allconv', 'densenet', 'resnext'],
+    choices=['wrn', 'allconv', 'densenet', 'resnext','convnext_tiny','resnet18','resnet18_PT','convnext_tiny_PT'],
     help='Choose architecture.')
 # Optimization options
+
+parser.add_argument(
+  '--optimizer',
+  '-o',
+  type=str,
+  default='sgd',
+  choices=['sgd','adamW'],
+  help='choose optimizer')
+parser.add_argument(
+  '--scheduler',
+  '-s',
+  type=str,
+  default='lambda',
+  choices=['lambda','cosineannealing'],
+  help='Choose learning rate scheduler')
 parser.add_argument(
     '--epochs', '-e', type=int, default=100, help='Number of epochs to train.')
 parser.add_argument(
@@ -110,7 +136,7 @@ parser.add_argument(
 # Checkpointing options
 parser.add_argument(
     '--save',
-    '-s',
+    '-S',
     type=str,
     default='./snapshots',
     help='Folder to save checkpoints.')
@@ -141,6 +167,14 @@ CORRUPTIONS = [
     'brightness', 'contrast', 'elastic_transform', 'pixelate',
     'jpeg_compression'
 ]
+
+PERTURBATIONS = [
+    'brightness', 'gaussian_blur', 'gaussian_noise_2', 'gaussian_noise_3','gaussian_noise',
+    'motion_blur', 'rotate', 'scale', 'shear', 'shot_noise_2','shot_noise_3','shot_noise',
+    'snow', 'spatter', 'speckle_noise_2', 'speckle_noise_3','speckle_noise','tilt',
+    'translate','zoom_blur'
+]
+
 
 
 def get_lr(step, total_steps, lr_max, lr_min):
@@ -241,7 +275,7 @@ def train(net, train_loader, optimizer, scheduler):
     loss_ema = loss_ema * 0.9 + float(loss) * 0.1
     if i % args.print_freq == 0:
       print('Train Loss {:.3f}'.format(loss_ema))
-
+      
   return loss_ema
 
 
@@ -285,6 +319,54 @@ def test_c(net, test_data, base_path):
 
   return np.mean(corruption_accs)
 
+"""Robustness(https://github.com/hendrycks/robustness/blob/master/ImageNet-P/cifar-p-eval.py)."""
+
+def flip_prob(predictions, noise_perturbation=False):
+    result = 0
+    step_size = 1
+    for vid_preds in predictions:
+        result_for_vid = []
+
+        for i in range(step_size):
+            prev_pred = vid_preds[i]
+
+            for pred in vid_preds[i::step_size][1:]:
+                result_for_vid.append(int(prev_pred != pred))
+                if not noise_perturbation: prev_pred = pred
+
+        result += np.mean(result_for_vid) / len(predictions)
+    return result
+
+"""Robustness(https://github.com/hendrycks/robustness/blob/master/ImageNet-P/cifar-p-eval.py)."""
+
+def test_p(net, base_path,num_classes,tensorboard_summaryWriter=None):
+  """Evaluate network on given perturbated dataset."""
+  flip_list = []
+  for perturbation in PERTURBATIONS:
+    dataset = torch.from_numpy(np.float32(np.load(base_path + perturbation +'.npy').transpose((0,1,4,2,3))))/255.
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+
+    predictions = []
+    with torch.no_grad():
+      for data in loader:
+          num_vids = data.size(0)
+          data = data.view(-1,3,32,32).cuda()
+
+          output = net(data * 2 - 1)
+
+          for vid in output.view(num_vids, -1, num_classes):
+              predictions.append(vid.argmax(1).to('cpu').numpy())
+      current_flip = flip_prob(predictions, True if 'noise' in perturbation else False)
+      flip_list.append(current_flip)
+      print('\n' + perturbation, 'Flipping Rate')
+      print(current_flip)
+    # log to Tensorboard
+    if(tensorboard_summaryWriter):
+      tensorboard_summaryWriter.add_scalars(perturbation + '_p',{'flipping_rate':current_flip},global_step=1)
+    
+  return np.mean(flip_list)
+
 
 def main():
   torch.manual_seed(1)
@@ -305,6 +387,7 @@ def main():
     test_data = datasets.CIFAR10(
         './data/cifar', train=False, transform=test_transform, download=True)
     base_c_path = './data/cifar/CIFAR-10-C/'
+    base_p_path = './data/cifar/CIFAR-10-P/'
     num_classes = 10
   else:
     train_data = datasets.CIFAR100(
@@ -338,13 +421,41 @@ def main():
     net = AllConvNet(num_classes)
   elif args.model == 'resnext':
     net = resnext29(num_classes=num_classes)
+  elif args.model == 'resnet18':
+    net = resnet18(num_classes=num_classes)
+  elif args.model == 'resnet18_PT':
+    net = resnet18(pretrained=True)
+    num_fea = net.fc.in_features # to get all the input features of last fully connected layer
+    net.fc= Linear(in_features=num_fea, out_features=num_classes, bias=True) #creating a new layer and assign it to last layer
+  elif args.model == 'convnext_tiny':
+    net = timm.create_model("convnext_tiny" , num_classes=num_classes)
+  elif args.model == 'convnext_tiny_PT':
+    net = timm.create_model("convnext_tiny", pretrained=True)
+    inp_fea = net.get_classifier().in_features;  #sequnetial layer classifier
+    net.fc = Linear(inp_fea, num_classes)
 
-  optimizer = torch.optim.SGD(
+
+  #Optimizer  
+
+  if args.optimizer == 'sgd':
+    optimizer = torch.optim.SGD(
+        net.parameters(),
+        args.learning_rate,
+        momentum=args.momentum,
+        weight_decay=args.decay,
+        nesterov=True)
+  elif args.optimizer == 'adamW':
+    optimizer = torch.optim.AdamW(
+        net.parameters(),
+        args.learning_rate)
+
+  
+  '''optimizer = torch.optim.SGD(  # By default Optimizer
       net.parameters(),
       args.learning_rate,
       momentum=args.momentum,
       weight_decay=args.decay,
-      nesterov=True)
+      nesterov=True)'''
 
   # Distribute model across all visible GPUs
   net = torch.nn.DataParallel(net).cuda()
@@ -371,14 +482,30 @@ def main():
     print('Mean Corruption Error: {:.3f}'.format(100 - 100. * test_c_acc))
     return
 
-  scheduler = torch.optim.lr_scheduler.LambdaLR(
+  '''scheduler = torch.optim.lr_scheduler.LambdaLR(  #By default Scheduler # Schedular is used to update the learning rate
       optimizer,
       lr_lambda=lambda step: get_lr(  # pylint: disable=g-long-lambda
           step,
           args.epochs * len(train_loader),
           1,  # lr_lambda computes multiplicative factor
-          1e-6 / args.learning_rate))
-
+          1e-6 / args.learning_rate))'''
+  
+  if args.scheduler == 'lambda': 
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: get_lr(  # pylint: disable=g-long-lambda
+            step,
+            args.epochs * len(train_loader),
+            1,  # lr_lambda computes multiplicative factor
+            1e-6 / args.learning_rate))
+  elif args.scheduler == 'cosineannealing':
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+      optimizer=optimizer,
+      T_max=args.epochs * len(train_loader),
+      eta_min= 1e-6 / args.learning_rate) 
+  
+  
+  
   if not os.path.exists(args.save):
     os.makedirs(args.save)
   if not os.path.isdir(args.save):
@@ -390,12 +517,20 @@ def main():
     f.write('epoch,time(s),train_loss,test_loss,test_error(%)\n')
 
   best_acc = 0
+
+  writer = SummaryWriter(args.save)
+
+
   print('Beginning training from epoch:', start_epoch + 1)
   for epoch in range(start_epoch, args.epochs):
     begin_time = time.time()
 
     train_loss_ema = train(net, train_loader, optimizer, scheduler)
     test_loss, test_acc = test(net, test_loader)
+
+    writer.add_scalar('Training Loss', train_loss_ema, epoch)
+    writer.add_scalar('Test Loss', test_loss, epoch)
+    writer.add_scalar('Test_Accuracy', test_acc, epoch)
 
     is_best = test_acc > best_acc
     best_acc = max(test_acc, best_acc)
@@ -427,9 +562,17 @@ def main():
         ' Test Error {4:.2f}'
         .format((epoch + 1), int(time.time() - begin_time), train_loss_ema,
                 test_loss, 100 - 100. * test_acc))
-
+  
   test_c_acc = test_c(net, test_data, base_c_path)
   print('Mean Corruption Error: {:.3f}'.format(100 - 100. * test_c_acc))
+  writer.add_scalars('Mean Corruption Error',{'test_c_acc':100 - 100. * test_c_acc},global_step=1)
+  
+  if args.dataset == 'cifar10':
+    test_fp = test_p(net, base_p_path,num_classes,writer)
+    print('Mean Perturbation Flipping Rate: {:.3f}'.format(test_fp))
+    writer.add_scalars('Mean Perturbation Flipping Rate',{'mean_p_flipping_rate':test_fp},global_step=1)
+  
+  writer.close()
 
   with open(log_path, 'a') as f:
     f.write('%03d,%05d,%0.6f,%0.5f,%0.2f\n' %
