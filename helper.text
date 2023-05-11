@@ -26,3 +26,17 @@ python cifar.py -m convnext_tiny --optimizer sgd --scheduler lambda -S ./snapsho
 python cifar.py -m convnext_tiny_PT --optimizer sgd --scheduler lambda -S ./snapshots/convnext_tiny_PT_sgd_lambda > convnext_tiny_PT_sgd_lambda.txt
 python cifar.py -m convnext_tiny --optimizer adamW --scheduler cosineannealing  -S ./snapshots/convnext_adamW_cosineannealing > convnext_tiny_adamW_cosineannealing.txt
 python cifar.py -m convnext_tiny_PT --optimizer adamW --scheduler cosineannealing -S ./snapshots/convnext_tiny_PT_adamW_cosineannealing > convnext_tiny_PT_adamW_cosineannealing.txt
+
+for different learning_rate
+
+python cifar.py -m resnet18 --optimizer sgd --scheduler lambda -lr 0.025 -S ./snapshots/res18_sgd_lambda > res18_sgd_lambda1.txt
+python cifar.py -m resnet18_PT --optimizer sgd --scheduler lambda -lr 0.02 -S ./snapshots/res18_PT_sgd_lambda > res18_PT_sgd_lambda1.txt
+python cifar.py -m resnet18 --optimizer adamW --scheduler cosineannealing -lr 0.025 -S ./snapshots/res18_adamW_cosineannealing > res18_adamW_cosineannealing1.txt
+python cifar.py -m resnet18_PT --optimizer adamW --scheduler cosineannealing -lr 0.015-S ./snapshots/res18_adamW_cosineannealing > res18_PT_adamW_cosineannealing1.txt
+
+
+python cifar.py -m convnext_tiny --optimizer sgd --scheduler lambda -lr 0.004 -S ./snapshots/convnext_tiny_sgd_lambda > convnext_tiny_sgd_lambda1.txt
+python cifar.py -m convnext_tiny_PT --optimizer sgd --scheduler lambda -lr 0.003 -S ./snapshots/convnext_tiny_PT_sgd_lambda > convnext_tiny_PT_sgd_lambda1.txt
+python cifar.py -m convnext_tiny --optimizer adamW --scheduler cosineannealing -lr 0.004 -S ./snapshots/convnext_adamW_cosineannealing > convnext_tiny_adamW_cosineannealing1.txt
+python cifar.py -m convnext_tiny_PT --optimizer adamW --scheduler cosineannealing -lr 0.003 -S ./snapshots/convnext_tiny_PT_adamW_cosineannealing > convnext_tiny_PT_adamW_cosineannealing1.txt
+
